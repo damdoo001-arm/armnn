@@ -369,6 +369,13 @@ unsigned int GetCpuAccNumberOfThreads(const ModelOptions& modelOptions)
     return numberOfThreads;
 }
 
+bool IsSmallDenseGraph(const Sme2ShapeProfile& profile)
+{
+    return profile.m_DepthwiseConvolution2dOps == 0 &&
+           profile.m_SmallDenseProjectionOps >= 4 &&
+           !profile.m_HasSmallMLargeNProjection;
+}
+
 bool HasFloatSmeRegressionRisk(const Sme2ShapeProfile& profile)
 {
     const bool isFloatOnly = !profile.m_HasFp16 && !profile.m_HasQuantized;
@@ -382,10 +389,7 @@ bool HasFloatSmeRegressionRisk(const Sme2ShapeProfile& profile)
         profile.m_NonPointwiseGemmMacs * 2 >= profile.m_GemmMacs &&
         !profile.m_HasSegmentationShape;
 
-    const bool hasSmallDenseGraph =
-        profile.m_DepthwiseConvolution2dOps == 0 &&
-        profile.m_SmallDenseProjectionOps >= 4 &&
-        !profile.m_HasSmallMLargeNProjection;
+    const bool hasSmallDenseGraph = IsSmallDenseGraph(profile);
 
     return profile.m_HasPoseShape ||
            profile.m_HasStyleTransferShape ||
@@ -460,7 +464,9 @@ void ApplySme2ShapePolicy(const Graph& graph, bool reduceFp32ToFp16, ModelOption
         return;
     }
 
-    const bool smeEnabled = multipleSmcus || !ShouldDisableSme(profile);
+    // shortcut: retain stock small-dense quantized graphs until signed-int8 softmax rounding is corrected.
+    const bool smeEnabled =
+        (multipleSmcus && !(profile.m_HasQuantized && IsSmallDenseGraph(profile))) || !ShouldDisableSme(profile);
     const bool sveEnabled = true;
     const unsigned int requestedThreads = GetCpuAccNumberOfThreads(modelOptions);
     const unsigned int selectedThreads = SelectNumberOfThreads(profile, requestedThreads);
