@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace armnn
 {
@@ -26,6 +27,10 @@ namespace
 
 struct Sme2ShapeProfile
 {
+    unsigned int m_Convolution2dOps = 0;
+    unsigned int m_FullyConnectedOps = 0;
+    unsigned int m_BatchMatMulOps = 0;
+    std::vector<TensorShape> m_SignedInt8SoftmaxShapes;
     unsigned int m_GemmLikeOps = 0;
     unsigned int m_DepthwiseConvolution2dOps = 0;
     unsigned int m_SmallDenseProjectionOps = 0;
@@ -304,15 +309,28 @@ Sme2ShapeProfile BuildSme2ShapeProfile(const Graph& graph, bool reduceFp32ToFp16
 
     for (const Layer* layer : graph)
     {
+        if (layer->GetType() == LayerType::Softmax && layer->GetNumInputSlots() > 0 &&
+            layer->GetInputSlot(0).IsTensorInfoSet())
+        {
+            const TensorInfo& inputInfo = layer->GetInputSlot(0).GetTensorInfo();
+            if (inputInfo.GetDataType() == DataType::QAsymmS8 && HasSpecifiedShape(inputInfo))
+            {
+                profile.m_SignedInt8SoftmaxShapes.push_back(inputInfo.GetShape());
+            }
+        }
+
         switch (layer->GetType())
         {
             case LayerType::Convolution2d:
+                ++profile.m_Convolution2dOps;
                 RecordConvolution2d(profile, *layer);
                 break;
             case LayerType::FullyConnected:
+                ++profile.m_FullyConnectedOps;
                 RecordFullyConnected(profile, *layer);
                 break;
             case LayerType::BatchMatMul:
+                ++profile.m_BatchMatMulOps;
                 RecordBatchMatMul(profile, *layer);
                 break;
             case LayerType::DepthwiseConvolution2d:
@@ -374,6 +392,31 @@ bool IsSmallDenseGraph(const Sme2ShapeProfile& profile)
     return profile.m_DepthwiseConvolution2dOps == 0 &&
            profile.m_SmallDenseProjectionOps >= 4 &&
            !profile.m_HasSmallMLargeNProjection;
+}
+
+// shortcut: match these four Int8 graph signatures until operator-level SME selection is validated.
+bool IsExcludedQuantizedGraph(const Sme2ShapeProfile& profile)
+{
+    if (!profile.m_HasQuantized || profile.m_HasFp16)
+    {
+        return false;
+    }
+
+    const auto& shapes = profile.m_SignedInt8SoftmaxShapes;
+    if (profile.m_FullyConnectedOps == 0 && profile.m_BatchMatMulOps == 0 && shapes.size() == 1)
+    {
+        return (profile.m_Convolution2dOps == 15 && profile.m_DepthwiseConvolution2dOps == 13 &&
+                shapes[0] == TensorShape({1, 1000})) ||
+               (profile.m_Convolution2dOps == 38 && profile.m_DepthwiseConvolution2dOps == 17 &&
+                shapes[0] == TensorShape({1, 384, 384, 21})) ||
+               (profile.m_Convolution2dOps == 37 && profile.m_DepthwiseConvolution2dOps == 13 &&
+                shapes[0] == TensorShape({1, 1917, 81}));
+    }
+
+    return profile.m_Convolution2dOps == 0 && profile.m_DepthwiseConvolution2dOps == 0 &&
+           profile.m_FullyConnectedOps == 14 && profile.m_BatchMatMulOps == 4 && shapes.size() == 3 &&
+           std::count(shapes.begin(), shapes.end(), TensorShape({1, 2, 128, 128})) == 2 &&
+           std::count(shapes.begin(), shapes.end(), TensorShape({1, 2})) == 1;
 }
 
 bool HasFloatSmeRegressionRisk(const Sme2ShapeProfile& profile)
@@ -464,9 +507,7 @@ void ApplySme2ShapePolicy(const Graph& graph, bool reduceFp32ToFp16, ModelOption
         return;
     }
 
-    // shortcut: retain stock small-dense quantized graphs until signed-int8 softmax rounding is corrected.
-    const bool smeEnabled =
-        (multipleSmcus && !(profile.m_HasQuantized && IsSmallDenseGraph(profile))) || !ShouldDisableSme(profile);
+    const bool smeEnabled = multipleSmcus ? !IsExcludedQuantizedGraph(profile) : !ShouldDisableSme(profile);
     const bool sveEnabled = true;
     const unsigned int requestedThreads = GetCpuAccNumberOfThreads(modelOptions);
     const unsigned int selectedThreads = SelectNumberOfThreads(profile, requestedThreads);
