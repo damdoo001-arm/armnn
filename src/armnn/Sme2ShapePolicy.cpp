@@ -394,7 +394,7 @@ bool IsSmallDenseGraph(const Sme2ShapeProfile& profile)
            !profile.m_HasSmallMLargeNProjection;
 }
 
-// shortcut: match these four Int8 graph signatures until operator-level SME selection is validated.
+// shortcut: match these five Int8 graph signatures until operator-level SME selection is validated.
 bool IsExcludedQuantizedGraph(const Sme2ShapeProfile& profile)
 {
     if (!profile.m_HasQuantized || profile.m_HasFp16)
@@ -403,6 +403,13 @@ bool IsExcludedQuantizedGraph(const Sme2ShapeProfile& profile)
     }
 
     const auto& shapes = profile.m_SignedInt8SoftmaxShapes;
+    if (profile.m_Convolution2dOps == 16 && profile.m_DepthwiseConvolution2dOps == 0 &&
+        profile.m_FullyConnectedOps == 0 && profile.m_BatchMatMulOps == 0 && shapes.empty() &&
+        profile.m_HasStyleTransferShape)
+    {
+        return true;
+    }
+
     if (profile.m_FullyConnectedOps == 0 && profile.m_BatchMatMulOps == 0 && shapes.size() == 1)
     {
         return (profile.m_Convolution2dOps == 15 && profile.m_DepthwiseConvolution2dOps == 13 &&
